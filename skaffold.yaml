@@ -36,7 +36,7 @@ build:
     workspace: src/cartservice
   - imageName: bluejedi/frontend
     workspace: src/frontend
-  - imageName: bluejedi/loadgenerator
+  - imageName: iamusama/loadgenerator
     workspace: src/loadgenerator
   - imageName: bluejedi/adservice
     workspace: src/adservice
