@@ -27,7 +27,7 @@ spec:
     spec:
       containers:
         - name: server
-          image: bluejedi/checkoutservice:e7ca03d
+          image: checkoutservice
           ports:
           - containerPort: 5050
           readinessProbe:

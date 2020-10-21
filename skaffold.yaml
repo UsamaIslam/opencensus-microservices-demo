@@ -26,7 +26,7 @@ build:
     workspace: src/recommendationservice
   - imageName: bluejedi/shippingservice
     workspace: src/shippingservice
-  - imageName: bluejedi/checkoutservice
+  - imageName: checkoutservice
     workspace: src/checkoutservice
   - imageName: bluejedi/paymentservice
     workspace: src/paymentservice

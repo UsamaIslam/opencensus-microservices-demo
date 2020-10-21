@@ -1,4 +1,4 @@
-module github.com/UsamaIslam/opencensus-microservices-demo/src/checkoutservice
+module github.com/GoogleCloudPlatform/microservices-demo/src/checkoutservice
 
 go 1.15
 

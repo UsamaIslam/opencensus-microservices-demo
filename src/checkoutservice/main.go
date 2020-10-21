@@ -17,17 +17,17 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
-	"net/http"
 	"os"
 	"time"
+	"net/http"
 
 	"cloud.google.com/go/profiler"
+	"contrib.go.opencensus.io/exporter/jaeger"
 	"contrib.go.opencensus.io/exporter/stackdriver"
+	"contrib.go.opencensus.io/exporter/prometheus"
 	"github.com/google/uuid"
-	"go.opencensus.io/exporter/jaeger"
-	"go.opencensus.io/exporter/prometheus"
+	"github.com/sirupsen/logrus"
 	"go.opencensus.io/plugin/ocgrpc"
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/trace"
@@ -35,8 +35,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	pb "github.com/census-ecosystem/opencensus-microservices-demo/src/checkoutservice/genproto"
-	money "github.com/census-ecosystem/opencensus-microservices-demo/src/checkoutservice/money"
+	pb "github.com/GoogleCloudPlatform/microservices-demo/src/checkoutservice/genproto"
+	money "github.com/GoogleCloudPlatform/microservices-demo/src/checkoutservice/money"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
@@ -44,6 +44,22 @@ const (
 	listenPort  = "5050"
 	usdCurrency = "USD"
 )
+
+var log *logrus.Logger
+
+func init() {
+	log = logrus.New()
+	log.Level = logrus.DebugLevel
+	log.Formatter = &logrus.JSONFormatter{
+		FieldMap: logrus.FieldMap{
+			logrus.FieldKeyTime:  "timestamp",
+			logrus.FieldKeyLevel: "severity",
+			logrus.FieldKeyMsg:   "message",
+		},
+		TimestampFormat: time.RFC3339Nano,
+	}
+	log.Out = os.Stdout
+}
 
 type checkoutService struct {
 	productCatalogSvcAddr string
@@ -54,15 +70,20 @@ type checkoutService struct {
 	paymentSvcAddr        string
 }
 
-var stackdriverExporter view.Exporter
-
 func main() {
-	go initTracing()
-	go initProfiling("checkoutservice", "1.0.0")
-	go func () {
-		initTracing()
-		initStats()
-	}()
+	if os.Getenv("DISABLE_TRACING") == "" {
+		log.Info("Tracing enabled.")
+		go initTracing()
+	} else {
+		log.Info("Tracing disabled.")
+	}
+
+	if os.Getenv("DISABLE_PROFILER") == "" {
+		log.Info("Profiling enabled.")
+		go initProfiling("checkoutservice", "1.0.0")
+	} else {
+		log.Info("Profiling disabled.")
+	}
 
 	port := listenPort
 	if os.Getenv("PORT") != "" {
@@ -83,7 +104,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	srv := grpc.NewServer(grpc.StatsHandler(&ocgrpc.ServerHandler{}))
+
+	var srv *grpc.Server
+	if os.Getenv("DISABLE_STATS") == "" {
+		log.Info("Stats enabled.")
+		srv = grpc.NewServer(grpc.StatsHandler(&ocgrpc.ServerHandler{}))
+	} else {
+		log.Info("Stats disabled.")
+		srv = grpc.NewServer()
+	}
 	pb.RegisterCheckoutServiceServer(srv, svc)
 	healthpb.RegisterHealthServer(srv, svc)
 	log.Infof("starting to listen on tcp: %q", lis.Addr().String())
@@ -92,7 +121,6 @@ func main() {
 }
 
 func initJaegerTracing() {
-
 	// Register the Jaeger exporter to be able to retrieve
 	// the collected spans.
 	exporter, err := jaeger.NewExporter(jaeger.Options{
@@ -126,42 +154,19 @@ func startPrometheusExporter(exporter *prometheus.Exporter) {
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
-func initStackDriverStatsExporter() {
-	// Reuse stactdriver exporter for stats if one is already created for tracing.
-	if stackdriverExporter == nil {
-		var err error
-		stackdriverExporter, err = stackdriver.NewExporter(stackdriver.Options{})
-		if err != nil {
-			log.Print("error creating stackdriver exporter");
-			return
-		}
-	}
-	view.RegisterExporter(stackdriverExporter)
-}
-
-func initStats() {
-	log.Print("init stats")
-
-	initStackDriverStatsExporter()
-
-	// Start prometheus exporter as well
-	exporter := initPrometheusStatsExporter()
-	go startPrometheusExporter(exporter)
-
-	if err := view.Register(ocgrpc.DefaultClientViews...); err != nil {
-		log.Fatal("error registering default grpc client views")
+func initStats(exporter *stackdriver.Exporter) {
+	view.SetReportingPeriod(60 * time.Second)
+	view.RegisterExporter(exporter)
+	
+	
+	if err := view.Register(ocgrpc.DefaultServerViews...); err != nil {
+		log.Warn("Error registering default server views")
+	} else {
+		log.Info("Registered default server views")
 	}
 }
 
-func initTracing() {
-	// This is a demo app with low QPS. trace.AlwaysSample() is used here
-	// to make sure traces are available for observation and analysis.
-	// In a production environment or high QPS setup please use
-	// trace.ProbabilitySampler set at the desired probability.
-	trace.ApplyConfig(trace.Config{DefaultSampler: trace.AlwaysSample()})
-
-	initJaegerTracing()
-
+func initStackdriverTracing() {
 	// TODO(ahmetb) this method is duplicated in other microservices using Go
 	// since they are not sharing packages.
 	for i := 1; i <= 3; i++ {
@@ -172,14 +177,24 @@ func initTracing() {
 			trace.RegisterExporter(exporter)
 			log.Info("registered Stackdriver tracing")
 
-			stackdriverExporter = exporter
+			// Register the views to collect server stats.
+			initStats(exporter)
 			return
 		}
 		d := time.Second * 10 * time.Duration(i)
 		log.Infof("sleeping %v to retry initializing Stackdriver exporter", d)
 		time.Sleep(d)
 	}
-	log.Printf("warning: could not initialize stackdriver exporter after retrying, giving up")
+	log.Warn("could not initialize Stackdriver exporter after retrying, giving up")
+}
+
+func initTracing() {
+	// Start prometheus exporter as well
+	exporter_prom := initPrometheusStatsExporter()
+	go startPrometheusExporter(exporter_prom)
+	
+	initJaegerTracing()
+	initStackdriverTracing()
 }
 
 func initProfiling(service, version string) {
