@@ -77,7 +77,7 @@ func main() {
 	mustMapEnv(&svc.emailSvcAddr, "EMAIL_SERVICE_ADDR")
 	mustMapEnv(&svc.paymentSvcAddr, "PAYMENT_SERVICE_ADDR")
 
-	log.Printf("service config: %+v", svc)
+	log.Infof("service config: %+v", svc)
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 	if err != nil {
@@ -86,8 +86,9 @@ func main() {
 	srv := grpc.NewServer(grpc.StatsHandler(&ocgrpc.ServerHandler{}))
 	pb.RegisterCheckoutServiceServer(srv, svc)
 	healthpb.RegisterHealthServer(srv, svc)
-	log.Printf("starting to listen on tcp: %q", lis.Addr().String())
-	log.Fatal(srv.Serve(lis))
+	log.Infof("starting to listen on tcp: %q", lis.Addr().String())
+	err = srv.Serve(lis)
+	log.Fatal(err)
 }
 
 func initJaegerTracing() {
@@ -104,6 +105,7 @@ func initJaegerTracing() {
 		log.Fatal(err)
 	}
 	trace.RegisterExporter(exporter)
+	log.Info("jaeger initialization completed.")
 }
 
 func initPrometheusStatsExporter() *prometheus.Exporter {
@@ -165,16 +167,16 @@ func initTracing() {
 	for i := 1; i <= 3; i++ {
 		exporter, err := stackdriver.NewExporter(stackdriver.Options{})
 		if err != nil {
-			log.Printf("info: failed to initialize stackdriver exporter: %+v", err)
+			log.Infof("failed to initialize stackdriver exporter: %+v", err)
 		} else {
 			trace.RegisterExporter(exporter)
-			log.Print("registered stackdriver tracing")
+			log.Info("registered Stackdriver tracing")
 
 			stackdriverExporter = exporter
 			return
 		}
 		d := time.Second * 10 * time.Duration(i)
-		log.Printf("sleeping %v to retry initializing stackdriver exporter", d)
+		log.Infof("sleeping %v to retry initializing Stackdriver exporter", d)
 		time.Sleep(d)
 	}
 	log.Printf("warning: could not initialize stackdriver exporter after retrying, giving up")
@@ -190,16 +192,16 @@ func initProfiling(service, version string) {
 			// ProjectID must be set if not running on GCP.
 			// ProjectID: "my-project",
 		}); err != nil {
-			log.Printf("warn: failed to start profiler: %+v", err)
+			log.Warnf("failed to start profiler: %+v", err)
 		} else {
-			log.Print("started stackdriver profiler")
+			log.Info("started Stackdriver profiler")
 			return
 		}
 		d := time.Second * 10 * time.Duration(i)
-		log.Printf("sleeping %v to retry initializing stackdriver profiler", d)
+		log.Infof("sleeping %v to retry initializing Stackdriver profiler", d)
 		time.Sleep(d)
 	}
-	log.Printf("warning: could not initialize stackdriver profiler after retrying, giving up")
+	log.Warn("could not initialize Stackdriver profiler after retrying, giving up")
 }
 
 func mustMapEnv(target *string, envKey string) {
@@ -214,8 +216,12 @@ func (cs *checkoutService) Check(ctx context.Context, req *healthpb.HealthCheckR
 	return &healthpb.HealthCheckResponse{Status: healthpb.HealthCheckResponse_SERVING}, nil
 }
 
+func (cs *checkoutService) Watch(req *healthpb.HealthCheckRequest, ws healthpb.Health_WatchServer) error {
+	return status.Errorf(codes.Unimplemented, "health check via Watch not implemented")
+}
+
 func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
-	log.Printf("[PlaceOrder] user_id=%q user_currency=%q", req.UserId, req.UserCurrency)
+	log.Infof("[PlaceOrder] user_id=%q user_currency=%q", req.UserId, req.UserCurrency)
 
 	orderID, err := uuid.NewUUID()
 	if err != nil {
@@ -232,14 +238,15 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 		Nanos: 0}
 	total = money.Must(money.Sum(total, *prep.shippingCostLocalized))
 	for _, it := range prep.orderItems {
-		total = money.Must(money.Sum(total, *it.Cost))
+		multPrice := money.MultiplySlow(*it.Cost, uint32(it.GetItem().GetQuantity()))
+		total = money.Must(money.Sum(total, multPrice))
 	}
 
 	txID, err := cs.chargeCard(ctx, &total, req.CreditCard)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to charge card: %+v", err)
 	}
-	log.Printf("payment went through (transaction_id: %s)", txID)
+	log.Infof("payment went through (transaction_id: %s)", txID)
 
 	shippingTrackingID, err := cs.shipOrder(ctx, req.Address, prep.cartItems)
 	if err != nil {
@@ -257,9 +264,9 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 	}
 
 	if err := cs.sendOrderConfirmation(ctx, req.Email, orderResult); err != nil {
-		log.Printf("failed to send order confirmation to %q: %+v", req.Email, err)
+		log.Warnf("failed to send order confirmation to %q: %+v", req.Email, err)
 	} else {
-		log.Printf("order confirmation email sent to %q", req.Email)
+		log.Infof("order confirmation email sent to %q", req.Email)
 	}
 	resp := &pb.PlaceOrderResponse{Order: orderResult}
 	return resp, nil
